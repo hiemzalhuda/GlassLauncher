@@ -14,10 +14,8 @@ buildscript {
 }
 
 allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
+    // Repositories are declared centrally in settings.gradle
+    // (FAIL_ON_PROJECT_REPOS), so none are added here.
 }
 
 tasks.register("clean", Delete) {
