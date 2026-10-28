@@ -1,6 +1,5 @@
 package com.hiemz.glasslauncher
 
-import android.app.WallpaperManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -53,7 +52,7 @@ class MainActivity : AppCompatActivity() {
         }
         registerReceiver(
             wallpaperChangedReceiver,
-            IntentFilter(WallpaperManager.ACTION_WALLPAPER_CHANGED)
+            IntentFilter(Intent.ACTION_WALLPAPER_CHANGED)
         )
         refreshApps()
     }
