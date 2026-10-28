@@ -13,7 +13,8 @@ class AppGridAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
         val view = GlassAppView(parent.context)
-        val height = (112 * parent.context.resources.displayMetrics.density).toInt()
+        // Tighter cell than v1's 112dp: 64dp squircle + label below.
+        val height = (96 * parent.context.resources.displayMetrics.density).toInt()
         view.layoutParams = RecyclerView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, height
         )

@@ -7,64 +7,85 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
-import android.graphics.Rect
 import android.graphics.Shader
 import android.graphics.drawable.BitmapDrawable
-import android.util.LruCache
 
 /**
- * Holds a screen-sized copy of the current wallpaper and serves TRUE BLUR
- * tiles: for a tile's on-screen rect, the wallpaper region behind that rect
- * is cropped, downscaled, box-blurred and cached. This is real blur of the
- * wallpaper behind the tile — not just a translucent overlay.
+ * Single source of truth for the wallpaper.
+ *
+ * [wallpaperBitmap] is the system wallpaper rendered ONCE into a screen-sized
+ * bitmap with center-crop-to-fill scaling — exactly the scaling the launcher
+ * background uses (the background ImageView shows this very bitmap, so no
+ * crop/zoom mismatch is possible). [blurredQuarter] is that same bitmap
+ * downscaled to 1/4 and box-blurred once. Every glass squircle crops its
+ * region live from [blurredQuarter] using its current screen position, so
+ * the blur always stays glued to the wallpaper — including mid-scroll in the
+ * drawer. No per-tile blur, no scroll-idle-only refresh, no stale crops.
  */
 object WallpaperBlurProvider {
 
-    private var wallpaper: Bitmap? = null
+    /** Screen-sized wallpaper bitmap, also used as the background image. */
+    var wallpaperBitmap: Bitmap? = null
+        private set
 
-    // 4 MB of cached blurred tiles (sizeOf is in KB).
-    private val cache = object : LruCache<String, Bitmap>(4 * 1024) {
-        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
-    }
+    /** The same wallpaper, downscaled to 1/4 and blurred. */
+    var blurredQuarter: Bitmap? = null
+        private set
+
+    var screenWidth = 0
+        private set
+    var screenHeight = 0
+        private set
+
+    private var preparedForW = 0
+    private var preparedForH = 0
 
     fun prepare(context: Context) {
-        if (wallpaper != null) return
         val metrics = context.resources.displayMetrics
         val sw = metrics.widthPixels
         val sh = metrics.heightPixels
+        if (wallpaperBitmap != null && preparedForW == sw && preparedForH == sh) return
+
         val drawable = try {
             WallpaperManager.getInstance(context).drawable
         } catch (e: Exception) {
             null
         }
-        val src: Bitmap? = when (drawable) {
-            is BitmapDrawable -> drawable.bitmap
-            null -> null
-            else -> {
-                val w = drawable.intrinsicWidth.takeIf { it > 0 } ?: sw
-                val h = drawable.intrinsicHeight.takeIf { it > 0 } ?: sh
-                Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
-                    val c = Canvas(bmp)
-                    drawable.setBounds(0, 0, w, h)
-                    drawable.draw(c)
-                }
+        val bmp = if (drawable != null) {
+            val srcW = (drawable as? BitmapDrawable)?.bitmap?.width
+                ?: drawable.intrinsicWidth.takeIf { it > 0 } ?: sw
+            val srcH = (drawable as? BitmapDrawable)?.bitmap?.height
+                ?: drawable.intrinsicHeight.takeIf { it > 0 } ?: sh
+            // Center-crop-to-fill: the same scaling an ImageView with
+            // CENTER_CROP applies to this drawable at screen size.
+            Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888).also { out ->
+                val scale = maxOf(sw / srcW.toFloat(), sh / srcH.toFloat())
+                val dx = (sw - srcW * scale) / 2f
+                val dy = (sh - srcH * scale) / 2f
+                val canvas = Canvas(out)
+                canvas.save()
+                canvas.translate(dx, dy)
+                canvas.scale(scale, scale)
+                drawable.setBounds(0, 0, srcW, srcH)
+                drawable.draw(canvas)
+                canvas.restore()
             }
-        }
-        wallpaper = if (src != null) centerCropToScreen(src, sw, sh) else fallbackGradient(sw, sh)
-    }
-
-    private fun centerCropToScreen(src: Bitmap, sw: Int, sh: Int): Bitmap {
-        val srcAspect = src.width.toFloat() / src.height
-        val dstAspect = sw.toFloat() / sh
-        val crop = if (srcAspect > dstAspect) {
-            val cw = (src.height * dstAspect).toInt()
-            Rect((src.width - cw) / 2, 0, (src.width - cw) / 2 + cw, src.height)
         } else {
-            val ch = (src.width / dstAspect).toInt()
-            Rect(0, (src.height - ch) / 2, src.width, (src.height - ch) / 2 + ch)
+            fallbackGradient(sw, sh)
         }
-        val cropped = Bitmap.createBitmap(src, crop.left, crop.top, crop.width(), crop.height())
-        return Bitmap.createScaledBitmap(cropped, sw, sh, true)
+
+        wallpaperBitmap?.takeIf { it !== bmp }?.recycle()
+        blurredQuarter?.recycle()
+        wallpaperBitmap = bmp
+        screenWidth = sw
+        screenHeight = sh
+        val qw = maxOf(1, sw / 4)
+        val qh = maxOf(1, sh / 4)
+        val small = Bitmap.createScaledBitmap(bmp, qw, qh, true)
+        blurredQuarter = Blur.blur(small, radius = 6, iterations = 3)
+        if (small !== blurredQuarter) small.recycle()
+        preparedForW = sw
+        preparedForH = sh
     }
 
     private fun fallbackGradient(sw: Int, sh: Int): Bitmap {
@@ -80,30 +101,13 @@ object WallpaperBlurProvider {
         return bmp
     }
 
-    /** Blurred bitmap of the wallpaper region behind [rect] (screen coordinates). */
-    fun blurredTile(rect: Rect): Bitmap? {
-        val wp = wallpaper ?: return null
-        val clamped = Rect(
-            rect.left.coerceIn(0, wp.width - 1),
-            rect.top.coerceIn(0, wp.height - 1),
-            rect.right.coerceIn(1, wp.width),
-            rect.bottom.coerceIn(1, wp.height)
-        )
-        if (clamped.width() <= 0 || clamped.height() <= 0) return null
-        val key = "${clamped.left},${clamped.top},${clamped.right},${clamped.bottom}"
-        cache.get(key)?.let { return it }
-        val crop = Bitmap.createBitmap(
-            wp, clamped.left, clamped.top, clamped.width(), clamped.height()
-        )
-        val smallW = maxOf(1, crop.width / 4)
-        val smallH = maxOf(1, crop.height / 4)
-        val small = Bitmap.createScaledBitmap(crop, smallW, smallH, true)
-        val blurred = Blur.blur(small, radius = 6, iterations = 3)
-        cache.put(key, blurred)
-        return blurred
-    }
-
-    fun clearCache() {
-        cache.evictAll()
+    /** Drop cached bitmaps (e.g. after the system wallpaper changes). */
+    fun invalidate() {
+        wallpaperBitmap?.recycle()
+        blurredQuarter?.recycle()
+        wallpaperBitmap = null
+        blurredQuarter = null
+        preparedForW = 0
+        preparedForH = 0
     }
 }
