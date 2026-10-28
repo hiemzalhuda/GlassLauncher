@@ -16,13 +16,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Install SDK packages
+      - name: Ensure SDK packages
         run: |
-          if ! command -v sdkmanager >/dev/null 2>&1; then
-            export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
-          fi
+          # ubuntu-latest runners already ship an Android SDK; just make sure
+          # the API 35 platform + build-tools we compile against are present.
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
